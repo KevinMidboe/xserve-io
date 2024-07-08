@@ -35,18 +35,6 @@ byte leds[23][4] = {
   {0b00000000, 0b00000000, 0b01000000, 0b00000000}  // 23
 };
 
-// void setup()
-// {
-//   Wire.begin(); // start up I2C bus
-
-//   Serial.println("setting up ports");
-
-//   resetBanks();
-// }
-
-// resetBanks();
-
-
 void writeCenterColumn(byte* banks) {
   Wire.beginTransmission(saa1064);
   Wire.write(1);
@@ -69,7 +57,7 @@ void writeCenterColumnFirstBank(byte* banks) {
 }
 
 // TODO prevent this from overwriting ethernet bit
-void resetBanks(byte* banks) {
+void resetCenterBanks(byte* banks) {
   banks[0] = 0;
   banks[1] = 0;
   banks[2] = 0;
@@ -81,26 +69,28 @@ void resetEthernetBit(byte* banks) {
 }
 
 void displayNumber(byte* banks, int number) { 
+  resetCenterBanks(banks);
+
   banks[0] = leds[number - 1][0];
   banks[1] = leds[number - 1][1];
   banks[2] = leds[number - 1][2];
   banks[3] = leds[number - 1][3];
-
-  writeCenterColumn(banks);
 }
 
 void displayUpToNumber(byte* banks, int number) { 
+  resetCenterBanks(banks);
+
   for (int i = 0; i < number; i++) {
     banks[0] |= leds[i][0];
     banks[1] |= leds[i][1];
     banks[2] |= leds[i][2];
     banks[3] |= leds[i][3];
   }
-
-  writeCenterColumn(banks);
 }
 
 void displayNumbers(byte* banks, int* numbersList, size_t length) {
+  resetCenterBanks(banks);
+
   for (int i = 0; i < length; i++) {
     int num = numbersList[i] - 1;
     banks[0] |= leds[num][0];
@@ -108,8 +98,6 @@ void displayNumbers(byte* banks, int* numbersList, size_t length) {
     banks[2] |= leds[num][2];
     banks[3] |= leds[num][3];
   }
-
-  writeCenterColumn(banks);
 }
 
 void displayPercentage(byte* banks, double percentDecimal) {
