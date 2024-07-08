@@ -1,42 +1,45 @@
 #include "Wire.h"
-#include <PCA9554.h>  // Load the PCA9554 Library
 
 #define TCAADDR 0x70
 
-// byte saa1064 = 0x3B;
-PCA9554 ioCon1(0x24);  // Create an object at this address
+// bits; 1 - current value, 2 - alarm state, 3 - last updated seconds
+int fanState[3] = {0, 0, -1};
+int tempState[3] = {0, 0, -1};
+// bits; 1 - nic 1 value, 2 - nic 2 value
+bool nicState[2] = {0, 0};
+// boolean 
+bool powerState = 0;
+int modeSelect = 0;
+// int; 1 - space available, 2 - CPU
+double usbData[2] = {0.91, 2};
+// int; 1 - value, 2 - binary latch updated
+int usbDiskSpace[2] = {21, 0};
+int usbCPUUsage[2] = {0, 0};
 
-
-// LEDs have two addresses, one for RED another for GREEN
-bool fanGreenLED;
-bool fanRedLED;
-bool tempGreenLED;
-bool tempRedLED;
-bool powerGreenLED;
-bool powerRedLED;
-bool modeSelect;
-
-bool nic1State = 0;
-bool nic2State = 0;
+// current physical button/switch state
 bool lockButtonState = 1;
 bool modeButtonState = 1;
 
-int powerState = 0;
-// first bit is current value, second bit is alarm state
-int fanState[2] = {0, 0};
-int tempState[2] = {0, 0};
+byte sideIOHash = 0b00000000;
+byte centerIOHash = 0b00000000;
 
-byte centerColumnsMemoryMap[2][4] = {
-  {0b00000000, 0b00000000, 0b00000000, 0b00000000}, // left column
-  {0b00000000, 0b00000000, 0b00000000, 0b00000000}  // right column
+// TCAA ports for left & right sides of IO & center column
+int sideDevicePorts[2] = {
+  2,  // left side
+  1   // right side
 };
 
-byte ioHash = 0;
+// - - - PHYSICAL SHIFT REGISTER MEMORY ADDRESSES SPACES START - - -
+// 1-to-1 map of physical shift register devices address map
+byte leftRightMemoryMap[2][1] = { 
+  0b00000000, // left I/O
+  0b00000000  // right I/O
+};
+byte centerColumnsMemoryMap[2][4] = {
+  {0b00000000, 0b00000000, 0b00000000, 0b00000000}, // left center column
+  {0b00000000, 0b00000000, 0b00000000, 0b00000000}  // right center column
+};
 
-// --- ADDRESS MAPs ---
-int IOMapLength = 8;
-bool* mapIO[8] = {&powerGreenLED, &powerRedLED, &fanGreenLED, &fanRedLED, &tempGreenLED, &tempRedLED, &lockButtonState, &modeSelect};
-// bool mapNics[3] = {nic1State, nic2State};
 
 // --- PIN DEFINITIONS ---
 int POWER_FAIL_PIN = 8;
@@ -52,7 +55,7 @@ unsigned long lastDebounceTimeMode = 0;
 const int DEBOUNCE_DELAY = 30;
 
 unsigned long lastUpdateIO = 0;
-const int IO_UPDATE_INTERVAL = 200;
+const int USB_POLL_INTERVAL = 600;
 
 void setup() {
   Serial.begin(9600);
@@ -70,23 +73,16 @@ void setup() {
   Wire.begin(); // start up I2C bus
   Serial.println("i2c setup");
 
-  ioCon1.portMode(ALLOUTPUT);
-  Serial.println("iocon1 setup");
-
-  delay(500);
-  
-  selectRightHalf();
-  lightUpIO();
-  selectLeftHalf();
-  lightUpIO();
+  // ioCon1.portMode(ALLOUTPUT);
+  // Serial.println("iocon1 setup");
+  _init();
 }
 
-void lightUpIO() {
-  Serial.println("ligthing up top io");
-  for (int i = 0; i < IOMapLength; ++i) {
-    ioCon1.digitalWrite(i, mapIO[i]);
-  }
-  Serial.println("finished ligthing up top io");
+void _init() {
+  displayUpToNumber(centerColumnsMemoryMap[0], 21);
+  displayUpToNumber(centerColumnsMemoryMap[1], 4);
+
+  updateCenterIO();
 }
 
 unsigned long currentTime = millis();
@@ -97,144 +93,100 @@ void updateTime() {
 
 int fanBlinkCounter = 0;
 
-unsigned long fanToggledAt;
-void updateFanState(int state) {
-  // fan changed and did so within 1 second
-  bool stateChanged = state != fanState[0];
-  fanState[0] = state;
+// TODO use the helper functions to bitwise shift using OR.
+// TODO need a better way to compare state changes, and mapping
+// bit values with states.
+bool shouldCenterUpdate() {
+  byte stateHash = 0;
+  // stateHash |= nicState[0] << 0; // nic left bit 0
+  // stateHash |= nicState[1] << 1; // nic right bit 1
+  stateHash |= modeSelect << 0; // nic right bit 2
+  // stateHash |= usbDiskSpace[0, 1] << 2;
+  // stateHash |= usbData[1] << 6;
 
-  // detect that blinking is happening
-  if (stateChanged && (currentTime - fanToggledAt > 250)) {
-    fanState[1] = 1;
-    fanToggledAt = currentTime;
-  }
-  
-  // detect that blinking stopped
-  // if alarm && it changes && it has been more then 2 times the frex since last toggle
-  if (fanState[1] == 1 && (currentTime > fanToggledAt + 1000)) {
-    // nothing to see here
-    fanState[1] = 0;
-  }
-}
-
-unsigned long tempToggledAt;
-void updateTempState(int state) {
-  bool stateChanged = state != tempState[0];
-  tempState[0] = state;
-
-  // was 2 seconds ago last time it toggled
-  if (stateChanged == 1 && (currentTime - tempToggledAt > 250)) {
-    tempState[1] = 1;
-    tempToggledAt = currentTime;
-  }
-
-  // detect that blinking stopped
-  // if alarm && it changes && it has been more then 2 times the frex since last toggle
-  if (tempState[1] == 1 && (currentTime > tempToggledAt + 1000)) {
-    // nothing to see here
-    tempState[1] = 0;
-  }
-}
-
-// TODO check that this goes RED when off
-void greenRed(bool* greenLED, bool* redLED, bool value) {
-  // if no power set red led
-  if (value == 0) {
-    *greenLED = 0;
-    *redLED = 1;
-  // else if power set green led
-  } else {
-    *greenLED = 1;
-    *redLED = 0;
-  }
-}
-
-void greenRedOnAlarm(bool* greedLED, bool* redLED, bool alarm) {
-  // if not alarm set green led
-  if (alarm == 0) {
-    *greedLED = 1;
-    *redLED = 0;
-  // if alarm set red led
-  } else {
-    *greedLED = 0;
-    *redLED = 1;
-  }
-}
-
-void greenRedBlinkOnAlarm(bool* greenLED, bool* redLED, bool value, bool alarm) {
-// void greenRedBlinkOnAlarm(bool* greenLED, bool* redLED, bool* currentState, bool* alarmState) {
-  // if no alarm --> set green led
-  if (alarm == 0) {
-    *greenLED = 1;
-    *redLED = 0;
-    return;
-  }
-
-  // everything below assumes alarm state
-  // alarm and signal --> red led (blink on)
-  if (value == 0) {
-    *greenLED = 0;
-    *redLED = 1;
-  } 
-  // alarm and no signal --> no led (blink off)
-  else {
-    *greenLED = 0;
-    *redLED = 0;
-  }
-}
-
-void writeIOLEDPoweredOff() {
-    ioCon1.digitalWrite(0, HIGH);
-    ioCon1.digitalWrite(1, LOW);
-    ioCon1.digitalWrite(2, HIGH);
-    ioCon1.digitalWrite(3, HIGH);
-    ioCon1.digitalWrite(4, HIGH);
-    ioCon1.digitalWrite(5, HIGH);
-    ioCon1.digitalWrite(6, *(mapIO[6]) == 1 ? 0 : 1);
-}
-
-void updateIOLED() {
-  if (powerState == 0) {
-    writeIOLEDPoweredOff();
-    return;
-  }
-
-  for (int i = 0; i < IOMapLength; ++i) {
-    ioCon1.digitalWrite(i, *(mapIO[i]) == 1 ? 0 : 1);
-  }
-}
-
-int lastIOHash = -1;
-bool shouldUpdateIOLed() {
-  greenRedBlinkOnAlarm(&fanGreenLED, &fanRedLED, fanState[0], fanState[1]);
-  greenRedOnAlarm(&tempGreenLED, &tempRedLED, tempState[1]);
-  greenRed(&powerGreenLED, &powerRedLED, powerState);
-
-  byte ioHash = 0;
-  for (byte i = 0; i < IOMapLength; i++)
-  {
-    bitWrite(ioHash, i, *(mapIO[i]));
-  }
-
-  if (ioHash == lastIOHash) {
-    // Don't update i2c ctrl if same value
-    // Serial.println("Not updating!!");
+  if (stateHash == centerIOHash) {
     return false;
   }
 
-  // Serial.println("Updating IO!!");
-  lastIOHash = ioHash;
+  Serial.print("updating center w/ hash: ");
+  Serial.println(stateHash);
+
+  centerIOHash = stateHash;
   return true;
+}
+
+bool shouldSidesUpdate() {
+  byte stateHash = 0;
+  stateHash |= fanState[0] << 0; // fan value bit 0
+  stateHash |= fanState[1] << 1; // fan alarm bit 1
+  stateHash |= tempState[0] << 2; // temp value bit 2
+  stateHash |= tempState[1] << 3; // temp alarm bit 3
+  stateHash |= powerState << 4; // power value bit 4
+  stateHash |= lockButtonState << 5; // lock button state bit 5
+
+  if (stateHash == sideIOHash) {
+    return false;
+  }
+
+  Serial.print("updating side w/ hash: ");
+  Serial.println(stateHash);
+
+  sideIOHash = stateHash;
+  return true;
+}
+
+void checkInputForAlarm(int value, int* state) {
+  bool _value = state[0];
+  bool alarm = state[1];
+  int lastAlarmAt = state[2];
+  bool stateChanged = value != _value;
+
+  if (stateChanged) {
+    state[0] = value; // TODO does this work (?)
+  }
+
+  // was 2 seconds ago last time it toggled
+  if (stateChanged == 1 && (currentTime - lastAlarmAt > 250)) {
+    state[1] = 1;
+    state[2] = currentTime;
+    Serial.println("alarm!");
+  }
+
+  // detect that blinking stopped
+  // if alarm && it changes && it has been more then 2 times the frex since last toggle
+  if (alarm == 1 && (currentTime > lastAlarmAt + 1000)) {
+    // nothing to see here
+    state[1] = 0;
+    // state[2] = currentTime;
+    Serial.println("no alarm!");
+  }
 }
 
 void updateState() {
   bool fanS = digitalRead(FAN_PIN);
-  updateFanState(fanS);
-  updateTempState(fanS);
+  checkInputForAlarm(fanS, fanState);
+  checkInputForAlarm(fanS, tempState);
   powerState = digitalRead(POWER_PIN);
 
-  nic1State = !digitalRead(NIC_1_PIN);
-  nic2State = !digitalRead(NIC_2_PIN);
+  nicState[0] = !digitalRead(NIC_1_PIN);
+  nicState[1] = !digitalRead(NIC_2_PIN);
+}
+
+unsigned long lastUSBPollTime = 0;
+void updateUSBData() {
+  if (currentTime > lastUSBPollTime + USB_POLL_INTERVAL) {
+    Serial.println("polling usb");
+
+    int USB_DATA = random(22);
+
+    if (USB_DATA > 0) {
+      usbDiskSpace[0] = USB_DATA;
+      usbDiskSpace[1] = 1;
+
+      updateCenterIO();
+    }
+    lastUSBPollTime = currentTime;
+  }
 }
 
 bool handleButtonPress(int address, bool* value, long unsigned int* debounce) {
@@ -257,7 +209,12 @@ void changeModes() {
   bool btnVal = !digitalRead(BUTTON_MODE_PIN);
 
   if (btnVal == 1) {
-    modeSelect = !modeSelect;
+    if (modeSelect == 2) {
+      modeSelect = 0;
+      return;
+    }
+
+    modeSelect += 1;
   }
 }
 
@@ -269,63 +226,104 @@ void tcaselect(uint8_t i) {
   Wire.endTransmission();  
 }
 
-void selectLeftHalf() {
-  tcaselect(2);
-}
-
-void selectRightHalf() {
-  tcaselect(1);
-}
-
 void writeEthernetActivity() {
-  selectLeftHalf();
-  resetEthernetBit(centerColumnsMemoryMap[0]);
-  computeEthernetActivity(centerColumnsMemoryMap[0], nic1State);
-  writeCenterColumnFirstBank(centerColumnsMemoryMap[0]);
-  delay(1);
+  for (int i = 0; i < 2; i++) {
+    tcaselect(sideDevicePorts[i]);
+    
+    byte* reg = centerColumnsMemoryMap[i];
+    resetEthernetBit(reg);
+    computeEthernetActivity(reg, nicState[i]);
+    writeCenterColumnFirstBank(reg);
+    delay(1);
+  }
+}
 
-  selectRightHalf();
-  resetEthernetBit(centerColumnsMemoryMap[1]);
-  computeEthernetActivity(centerColumnsMemoryMap[1], nic2State);
-  writeCenterColumnFirstBank(centerColumnsMemoryMap[1]);
+void updateLeftRightIO() {
+  for (int i = 0; i < 2; i++) {
+    tcaselect(sideDevicePorts[i]);
+    
+    byte* reg = leftRightMemoryMap[i];
+    resetSideBanks(reg);
+
+    // power LED
+    if (powerState == 0) {
+      setPowerRed(reg);
+    } else {
+      setPowerGreen(reg);
+    }
+  
+    // fan LED
+    if (fanState[0] == 1 && fanState[1] == 0) {
+      setFanGreen(reg);
+    } else if (fanState[0] == 1 && fanState[1] == 1) {
+      setFanRed(reg);
+    } else if (fanState[0] == 0 && fanState[1] == 1) {
+      setFanOff(reg);
+    }
+
+    // temp LED
+    if (tempState[1] == 1) {
+      setTempRed(reg);
+    } else {
+      setTempGreen(reg);
+    }
+
+    // lock LED
+    if (lockButtonState == 1) {
+      setLockButton(reg);
+    }
+
+    updateIOLED(reg);
+    delay(1);
+  }
+}
+
+void updateCenterIO() {
+  int val;
+  Serial.print("modeSelect: ");
+  Serial.println(modeSelect);
+
+  if (modeSelect == 0) { // CPU mode
+    displayUpToNumber(centerColumnsMemoryMap[0], usbDiskSpace[0]);
+    displayUpToNumber(centerColumnsMemoryMap[1], usbDiskSpace[0]);
+  } else if (modeSelect == 1) { // disk mode
+    displayPercentage(centerColumnsMemoryMap[0], 0.91);
+    displayPercentage(centerColumnsMemoryMap[1], 0.91);
+  } else if (modeSelect == 2) { // random
+    displayNumber(centerColumnsMemoryMap[0], 1 + random(22));
+    displayNumber(centerColumnsMemoryMap[1], 1 + random(22));
+  }
+
+  for (int i = 0; i < 2; i++) {
+    tcaselect(sideDevicePorts[i]);
+    writeCenterColumn(centerColumnsMemoryMap[i]);
+    delay(1);
+  }
 }
 
 void loop() {
-  // Serial.println("loop start");
-  
   updateTime();
   updateState();
-  handleButtonPress(BUTTON_LOCK_PIN, &lockButtonState, &lastDebounceTimeLock);
-  if (handleButtonPress(BUTTON_MODE_PIN, &modeButtonState, &lastDebounceTimeMode)) {
-    changeModes();
-  }
-  
+  updateUSBData();
   writeEthernetActivity();
-  
-  if (shouldUpdateIOLed() == true) {
-    resetBanks(centerColumnsMemoryMap[0]);
 
-    selectLeftHalf();
-    updateIOLED();
-    // displayUpToNumber(21);
-    displayPercentage(centerColumnsMemoryMap[0], 0.91);
+  // lock switch
+  handleButtonPress(BUTTON_LOCK_PIN, &lockButtonState, &lastDebounceTimeLock);
 
-    delay(1);
-    resetBanks(centerColumnsMemoryMap[1]);
-    selectRightHalf();
-    updateIOLED();
+  // mode select button
+  if (handleButtonPress(BUTTON_MODE_PIN, &modeButtonState, &lastDebounceTimeMode) && modeButtonState == 1) {
+    changeModes();
+    
     displayUpToNumber(centerColumnsMemoryMap[1], random(24));
   }
-  // if (currentTime - lastUpdateIO > IO_UPDATE_INTERVAL) {
-  //   lastUpdateIO = currentTime;
-  //   updateIOLED();
-  // }
-//   selectRightHalf();
-// selectLeftHalf();
-// shouldUpdateIOLed
 
-//   updateRightIOLED();
+  if (shouldSidesUpdate()) {
+    updateLeftRightIO();
+  }
+
+  if (shouldCenterUpdate()) {
+    updateCenterIO();
+  }
   
   delay(20);
-  // Serial.println("loop end");
 }
